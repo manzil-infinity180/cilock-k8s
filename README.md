@@ -98,10 +98,13 @@ kubectl label namespace my-namespace cilock-policy=enforce
 
 ## Verifying an image without a cluster
 
-The webhook binary doubles as a CLI for local debugging:
+`cilock-k8s` is this repo's binary (not the `cilock` CLI — that one creates
+the evidence at build time). Its main mode is `serve`, the admission webhook,
+but it doubles as a CLI that runs the exact same verification locally:
 
 ```bash
-cilock-k8s verify \
+go build -o cilock-k8s .
+./cilock-k8s verify \
   --policy policy.signed.json \
   --policy-key policy-pub.pem \
   --attestation-dir attestations/ \
