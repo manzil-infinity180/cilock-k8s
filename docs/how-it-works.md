@@ -12,34 +12,7 @@ The proof is a signed **attestation** (evidence recorded at build time), and
 the rule is a signed **policy** (what evidence is required). The admission
 webhook is the enforcement point that connects the two.
 
-```
- BUILD TIME (dev/attest-demo.sh)                 ADMISSION TIME (webhook)
- ───────────────────────────────                 ────────────────────────
-                                                 kubectl run …
- docker build ──► demo image                          │
-      │                                               ▼
-      ▼                                    ┌─ API server ────────────┐
- docker push ──► localhost:5001            │ namespace labeled       │
-      │                                    │ cilock-policy=enforce?  │
-      ▼                                    └──────────┬──────────────┘
- cilock run --step build -a oci                       │ AdmissionReview (pod spec)
-   wraps: docker save (image tar)                     ▼
-   records: imageid, manifestdigest,       ┌─ cilock-k8s webhook ────────────────┐
-            layer digests, materials…      │ 1. image ref ──► registry lookup    │
-      │                                    │    ──► manifest digest + image ID   │
-      ▼                                    │ 2. find attestations whose SUBJECTS │
- build.att.json                            │    contain those digests            │
- (DSSE envelope, signed)                   │ 3. workflow.Verify:                 │
-      │                                    │    • policy signature valid?        │
-      ▼                                    │    • attestation signature valid?   │
- cilock policy from-bundles                │    • signer is a trusted            │
-   + cilock sign                           │      functionary for step "build"?  │
-      │                                    │    • required attestors present?    │
-      ▼                                    └──────┬──────────────────────────────┘
- policy.signed.json ───────────────────────────►  │
- policy-pub.pem (trust anchor) ────────────────►  ▼
-                                             allow / deny
-```
+![cilock-k8s flow: build-time attestation (docker build/push, cilock run, policy generation) feeding the admission-time webhook that resolves digests, finds attestations, and runs workflow.Verify to allow or deny](assets/cilock-k8s-flow.svg){ .diagram }
 
 Three artifacts cross from build time to admission time:
 

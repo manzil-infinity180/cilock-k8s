@@ -5,21 +5,7 @@ pods whose container images have verifiable
 [witness](https://witness.dev) / [cilock](https://github.com/aflock-ai/rookery)
 attestations.
 
-```
- build time                                admission time
- ──────────                                ──────────────
- docker build ─┐
-               ├─ cilock run -a oci ──► build.att.json (DSSE, signed)
- docker push ──┘        │
-                        ▼
-        cilock policy from-bundles ──► policy.signed.json
-                        │                       │
-                        ▼                       ▼
-              ┌───────────────────────────────────────┐
- pod create ─►│ cilock-k8s webhook                    │──► allow / deny
-              │  image ──► digests ──► workflow.Verify│
-              └───────────────────────────────────────┘
-```
+![cilock-k8s flow: build-time attestation and admission-time verification](assets/cilock-k8s-flow.svg){ .diagram }
 
 A pod referencing an attested image is admitted; anything else is denied by
 the API server with the verification failure as the error message.
