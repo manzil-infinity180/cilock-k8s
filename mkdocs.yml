@@ -1,0 +1,42 @@
+site_name: cilock-k8s
+site_description: PoC Kubernetes admission controller verifying container image attestations with the cilock/witness attestation library
+site_url: https://manzil-infinity180.github.io/cilock-k8s/
+repo_url: https://github.com/manzil-infinity180/cilock-k8s
+repo_name: manzil-infinity180/cilock-k8s
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - How it works: how-it-works.md
+  - Try it yourself: try-it-yourself.md
+  - Use it with your app: use-with-your-app.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences

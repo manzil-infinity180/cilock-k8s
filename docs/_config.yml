@@ -1,4 +1,0 @@
-title: cilock-k8s
-description: PoC Kubernetes admission controller that verifies container image attestations with the cilock/witness attestation library
-theme: jekyll-theme-minimal
-markdown: kramdown
