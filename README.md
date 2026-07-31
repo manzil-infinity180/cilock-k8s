@@ -62,6 +62,17 @@ any other `source.Sourcer`) is the natural next step.
   `replace` directives in `go.mod` — adjust those paths (and `CILOCK_DIR` for
   the dev scripts) to your checkout location.
 
+  > **Why a local checkout instead of published modules?** The rookery
+  > `attestation` module is published to the Go proxy, but the attestor
+  > *plugin* modules this webhook needs (`policyverify` is mandatory for
+  > `workflow.Verify`) declare their `attestation` dependency as the
+  > placeholder version `v0.0.0-00010101000000-000000000000`, which only
+  > resolves via the monorepo's internal `replace` directives — and Go
+  > ignores a dependency's replaces. A proxy-only build therefore fails with
+  > `invalid version: unknown revision 000000000000`. Once rookery publishes
+  > its plugins with real version requirements, the `replace` block here can
+  > simply be deleted.
+
 ## Quickstart
 
 ```bash
