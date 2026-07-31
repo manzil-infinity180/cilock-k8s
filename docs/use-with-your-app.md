@@ -140,7 +140,7 @@ cross-compile with `CGO_ENABLED=0 GOOS=linux go build -o bin/cilock-k8s .`),
 then apply `dev/manifests/webhook.tmpl.yaml` after filling in:
 
 - the image name,
-- `{{CA_BUNDLE}}` — base64 of the CA that signed the serving cert,
+- the `CA_BUNDLE` placeholder — base64 of the CA that signed the serving cert,
 - the `--registry-alias`/`--insecure-registry` args — **delete them** if your
   registry is a normal HTTPS registry reachable under its real name; they
   exist only for dev registries (private-registry auth uses the standard
