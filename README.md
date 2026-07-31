@@ -124,9 +124,10 @@ without needing the registry manifest digest at attestation time.
 
 ## Credits
 
-- Original judge-k8s PoC by [Cole Kennedy](https://github.com/colek42)
-  (TestifySec), built on early [witness](https://github.com/testifysec/witness)
-  + Rekor — the git history of that work is preserved in this repository.
+- Original PoC: [testifysec/judge-k8s](https://github.com/testifysec/judge-k8s)
+  by [Cole Kennedy](https://github.com/colek42) (TestifySec), built on early
+  [witness](https://github.com/testifysec/witness) + Rekor — the git history
+  of that work is preserved in this repository.
 - Rewritten to use the actively maintained
   [cilock / rookery attestation library](https://github.com/aflock-ai/rookery)
   (the lineage of [go-witness](https://github.com/in-toto/go-witness)).
