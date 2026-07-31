@@ -46,6 +46,14 @@ The PoC runs fully offline: attestations and the policy are mounted into the
 webhook pod from ConfigMaps. Swapping the file-based store for Archivista (or
 any other `source.Sourcer`) is the natural next step.
 
+## Documentation
+
+| doc | read it when you want to |
+|---|---|
+| [docs/how-it-works.md](docs/how-it-works.md) | understand every stage — what each `dev/` script creates and why, and how admission-time verification works |
+| [docs/try-it-yourself.md](docs/try-it-yourself.md) | run the demo hands-on, with expected output, experiments (tamper / wrong key / no label), and troubleshooting |
+| [docs/use-with-your-app.md](docs/use-with-your-app.md) | protect **your own application**: attest your image, create and sign your policy, deploy and enforce |
+
 ## Requirements
 
 - Go ≥ 1.26, Docker, kind, kubectl, openssl
