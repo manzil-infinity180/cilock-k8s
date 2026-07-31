@@ -3,3 +3,8 @@
 kube-image-bouncer
 pki
 .dccache
+bin/
+dev/.bin/
+dev/.keys/
+dev/.tls/
+dev/.artifacts/
