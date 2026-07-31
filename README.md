@@ -48,6 +48,8 @@ any other `source.Sourcer`) is the natural next step.
 
 ## Documentation
 
+📖 **Docs site: [manzil-infinity180.github.io/cilock-k8s](https://manzil-infinity180.github.io/cilock-k8s/)**
+
 | doc | read it when you want to |
 |---|---|
 | [docs/how-it-works.md](docs/how-it-works.md) | understand every stage — what each `dev/` script creates and why, and how admission-time verification works |
