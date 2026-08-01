@@ -1,6 +1,5 @@
-// Package verify verifies container images against a signed witness/cilock
-// policy using the rookery attestation library (the engine behind `cilock
-// verify`).
+// Package verify verifies container images against a signed witness policy
+// using the in-toto go-witness library (the engine behind `witness verify`).
 package verify
 
 import (
@@ -12,23 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/aflock-ai/rookery/attestation/cryptoutil"
-	"github.com/aflock-ai/rookery/attestation/dsse"
-	"github.com/aflock-ai/rookery/attestation/source"
-	"github.com/aflock-ai/rookery/attestation/workflow"
+	// Importing the root package also registers every attestor (including
+	// the mandatory policyverify attestor) via its init imports.
+	witness "github.com/in-toto/go-witness"
+	"github.com/in-toto/go-witness/cryptoutil"
+	"github.com/in-toto/go-witness/dsse"
+	"github.com/in-toto/go-witness/source"
 
 	"github.com/manzil-infinity180/cilock-k8s/pkg/image"
-
-	// Register the attestors used by verification. policyverify is mandatory:
-	// workflow.Verify drives the whole verification through it. The rest let
-	// the policy engine parse the demo collection's attestations into their
-	// typed forms for rego evaluation.
-	_ "github.com/aflock-ai/rookery/plugins/attestors/environment"
-	_ "github.com/aflock-ai/rookery/plugins/attestors/git"
-	_ "github.com/aflock-ai/rookery/plugins/attestors/material"
-	_ "github.com/aflock-ai/rookery/plugins/attestors/oci"
-	_ "github.com/aflock-ai/rookery/plugins/attestors/policyverify"
-	_ "github.com/aflock-ai/rookery/plugins/attestors/product"
 )
 
 // Options configures a Verifier.
@@ -153,9 +143,9 @@ func (v *Verifier) VerifyImage(ctx context.Context, imageRef string) (*Result, e
 		return nil, err
 	}
 
-	verifyResult, err := workflow.Verify(ctx, v.policyEnvelope, v.policyVerifiers,
-		workflow.VerifyWithSubjectDigests(subjects),
-		workflow.VerifyWithCollectionSource(v.collectionSrc),
+	verifyResult, err := witness.Verify(ctx, v.policyEnvelope, v.policyVerifiers,
+		witness.VerifyWithSubjectDigests(subjects),
+		witness.VerifyWithCollectionSource(v.collectionSrc),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("image %s (%s) failed policy verification: %w", imageRef, digests, err)

@@ -1,8 +1,17 @@
-# cilock-k8s
+# cilock-k8s (witness-poc branch)
 
 **Proof-of-concept Kubernetes validating admission webhook that only admits
 pods whose container images have verifiable [witness](https://witness.dev)
-/ [cilock](https://github.com/aflock-ai/rookery) attestations.**
+attestations.**
+
+> **This branch uses upstream [in-toto go-witness](https://github.com/in-toto/go-witness)
+> + the [witness](https://github.com/in-toto/witness) CLI.** Both are
+> published Go modules, so this branch needs **no local checkouts and no
+> `replace` directives** — everything resolves from the module proxy. The
+> `main` branch is the same webhook built on
+> [cilock / rookery](https://github.com/aflock-ai/rookery) instead (more
+> attestors, `policy from-bundles` generator, but requires a local rookery
+> checkout). Pick whichever ecosystem you use.
 
 When a pod is created in an enforced namespace, the webhook:
 
@@ -56,24 +65,16 @@ any other `source.Sourcer`) is the natural next step.
 | [docs/try-it-yourself.md](docs/try-it-yourself.md) | run the demo hands-on, with expected output, experiments (tamper / wrong key / no label), and troubleshooting |
 | [docs/use-with-your-app.md](docs/use-with-your-app.md) | protect **your own application**: attest your image, create and sign your policy, deploy and enforce |
 
+The docs describe the cilock variant (`main` branch); on this branch mentally
+substitute `cilock run` → `witness run`, `cilock sign` → `witness sign`, and
+`cilock policy from-bundles` → the policy JSON that `dev/attest-demo.sh`
+constructs itself. The webhook, manifests, and admission flow are identical.
+
 ## Requirements
 
-- Go ≥ 1.26, Docker, kind, kubectl, openssl
-- A local checkout of the [rookery](https://github.com/aflock-ai/rookery)
-  monorepo (cilock and its `attestation` library). The module is consumed via
-  `replace` directives in `go.mod` — adjust those paths (and `CILOCK_DIR` for
-  the dev scripts) to your checkout location.
-
-  > **Why a local checkout instead of published modules?** The rookery
-  > `attestation` module is published to the Go proxy, but the attestor
-  > *plugin* modules this webhook needs (`policyverify` is mandatory for
-  > `workflow.Verify`) declare their `attestation` dependency as the
-  > placeholder version `v0.0.0-00010101000000-000000000000`, which only
-  > resolves via the monorepo's internal `replace` directives — and Go
-  > ignores a dependency's replaces. A proxy-only build therefore fails with
-  > `invalid version: unknown revision 000000000000`. Once rookery publishes
-  > its plugins with real version requirements, the `replace` block here can
-  > simply be deleted.
+- Go ≥ 1.26, Docker, kind, kubectl, openssl, jq
+- Nothing else: `go-witness` is a normal published module, and the dev
+  scripts `go install` the `witness` CLI automatically.
 
 ## Quickstart
 
@@ -86,7 +87,7 @@ This runs, in order (see `dev/`):
 | step | script | what it does |
 |---|---|---|
 | `dev-up` | `kind-up.sh` | kind cluster + local registry (`localhost:5001`) |
-| `dev-prepare` | `gen-certs.sh`, `attest-demo.sh` | webhook TLS certs; build+push demo image; `cilock run -a oci` over `docker save`; `cilock policy from-bundles` + `cilock sign` |
+| `dev-prepare` | `gen-certs.sh`, `attest-demo.sh` | webhook TLS certs; build+push demo image; `witness run -a oci` over `docker save`; policy JSON built by script (witness has no `policy from-bundles`) + `witness sign` |
 | `dev-deploy` | `deploy.sh` | build webhook image, `kind load`, deploy webhook + policy + attestations, register the ValidatingWebhookConfiguration |
 | `dev-test` | `e2e.sh` | attested image admitted, unattested image denied |
 
