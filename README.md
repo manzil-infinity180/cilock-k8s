@@ -4,6 +4,16 @@
 pods whose container images have verifiable [witness](https://witness.dev)
 / [cilock](https://github.com/aflock-ai/rookery) attestations.**
 
+> **Two variants, same webhook:** this branch (`main`) verifies with the
+> [cilock / rookery](https://github.com/aflock-ai/rookery) attestation
+> library (more attestors, `policy from-bundles` generator; needs a local
+> rookery checkout). The
+> [`witness-poc` branch](https://github.com/manzil-infinity180/cilock-k8s/tree/witness-poc)
+> verifies with upstream [in-toto go-witness](https://github.com/in-toto/go-witness)
+> + the [witness](https://github.com/in-toto/witness) CLI — fully published
+> modules, no local checkouts or `replace` directives. Pick the ecosystem
+> you use.
+
 When a pod is created in an enforced namespace, the webhook:
 
 1. resolves every container image reference against its registry to the

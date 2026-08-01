@@ -10,6 +10,12 @@ attestations.
 A pod referencing an attested image is admitted; anything else is denied by
 the API server with the verification failure as the error message.
 
+Two variants exist: `main` verifies with the cilock / rookery attestation
+library, while the
+[`witness-poc` branch](https://github.com/manzil-infinity180/cilock-k8s/tree/witness-poc)
+uses upstream [in-toto go-witness](https://github.com/in-toto/go-witness) and
+the `witness` CLI (fully published modules — no local checkouts needed).
+
 ## Guides
 
 - **[How it works](how-it-works.md)** — every stage explained: what each
