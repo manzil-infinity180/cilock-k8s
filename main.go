@@ -14,12 +14,19 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/manzil-infinity180/cilock-k8s/pkg/handlers"
+	"github.com/manzil-infinity180/cilock-k8s/pkg/platform"
 	"github.com/manzil-infinity180/cilock-k8s/pkg/verify"
 )
+
+// agentVersion is reported to the platform on every check-in. Overridden at
+// release time via -ldflags "-X main.agentVersion=...".
+var agentVersion = "0.1.0-dev"
 
 type commonFlags struct {
 	policy             string
@@ -94,6 +101,9 @@ func serveCmd(args []string) {
 	listen := fs.String("listen", ":8443", "address to listen on")
 	tlsCert := fs.String("tls-cert", "/etc/webhook/certs/tls.crt", "path to the TLS certificate")
 	tlsKey := fs.String("tls-key", "/etc/webhook/certs/tls.key", "path to the TLS private key")
+	platformURL := fs.String("platform-url", "", "TestifySec platform base URL; empty runs the original file-only mode")
+	platformToken := fs.String("platform-token", "", "agent credential from registerKubernetesCluster (or env CILOCK_PLATFORM_TOKEN)")
+	clusterUID := fs.String("cluster-uid", "", "kube-system namespace UID; auto-detected in-cluster when empty")
 	_ = fs.Parse(args)
 
 	verifier, err := newVerifier(cf)
@@ -103,8 +113,58 @@ func serveCmd(args []string) {
 
 	log.Printf("loaded policy %s with %d attestation envelope(s)", cf.policy, len(verifier.AttestationRefs()))
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Platform mode is opt-in: without --platform-url the webhook behaves
+	// exactly like the original PoC (file-based policy, always enforcing,
+	// nothing reported). This is also the offline/air-gapped mode.
+	var pc *platform.Client
+	if *platformURL != "" {
+		token := *platformToken
+		if token == "" {
+			token = os.Getenv("CILOCK_PLATFORM_TOKEN")
+		}
+		if token == "" {
+			log.Fatalf("--platform-url is set but no credential given: pass --platform-token or set CILOCK_PLATFORM_TOKEN")
+		}
+
+		uid := *clusterUID
+		if uid == "" {
+			detected, err := platform.DetectClusterUID(ctx)
+			if err != nil {
+				log.Fatalf("failed to detect cluster UID (pass --cluster-uid explicitly): %v", err)
+			}
+			uid = detected
+		}
+
+		pc, err = platform.New(ctx, platform.Config{
+			PlatformURL:  *platformURL,
+			Token:        token,
+			ClusterUID:   uid,
+			AgentVersion: agentVersion,
+		})
+		if err != nil {
+			log.Fatalf("failed to initialize platform client: %v", err)
+		}
+
+		log.Printf("platform mode: reporting to %s as cluster %s (mode %s until first check-in)", *platformURL, uid, pc.Mode())
+	}
+
+	// pcDone closes once the platform client has made its final flush after
+	// ctx is cancelled; already closed when running without a platform.
+	pcDone := make(chan struct{})
+	if pc != nil {
+		go func() {
+			pc.Run(ctx)
+			close(pcDone)
+		}()
+	} else {
+		close(pcDone)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/validate", handlers.Admission(verifier))
+	mux.HandleFunc("/validate", handlers.Admission(verifier, pc))
 	mux.HandleFunc("/healthz", handlers.Health)
 
 	server := &http.Server{
@@ -113,9 +173,28 @@ func serveCmd(args []string) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("listening on %s", *listen)
-	if err := server.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil {
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Printf("listening on %s", *listen)
+		serverErr <- server.ListenAndServeTLS(*tlsCert, *tlsKey)
+	}()
+
+	select {
+	case err := <-serverErr:
 		log.Fatalf("server exited: %v", err)
+	case <-ctx.Done():
+		// SIGTERM during rollout: stop accepting reviews, then give the
+		// platform client's final flush (triggered by the same ctx) a moment
+		// so the last decision window is not lost.
+		log.Printf("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+		select {
+		case <-pcDone:
+		case <-shutdownCtx.Done():
+			log.Printf("gave up waiting for the final decision flush")
+		}
 	}
 }
 
