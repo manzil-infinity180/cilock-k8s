@@ -57,16 +57,25 @@ type Verifier struct {
 	attestationRefs []string
 }
 
-// New loads the policy, trusted public key, and attestation envelopes.
+// New loads the policy from Options.PolicyPath, plus the trusted public key
+// and attestation envelopes.
 func New(o Options) (*Verifier, error) {
 	policyBytes, err := os.ReadFile(o.PolicyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read policy file: %w", err)
 	}
+	return NewFromPolicyBytes(policyBytes, o)
+}
 
+// NewFromPolicyBytes builds a Verifier from an in-memory signed policy (DSSE
+// envelope JSON) instead of a file — the platform policy-sync path downloads
+// the envelope from Archivista by gitoid and constructs the replacement
+// verifier from bytes. Options.PolicyPath is ignored; the public key and
+// attestation directory are still loaded from their configured paths.
+func NewFromPolicyBytes(policyBytes []byte, o Options) (*Verifier, error) {
 	policyEnvelope := dsse.Envelope{}
 	if err := json.Unmarshal(policyBytes, &policyEnvelope); err != nil {
-		return nil, fmt.Errorf("failed to parse policy file %q as a DSSE envelope: %w", o.PolicyPath, err)
+		return nil, fmt.Errorf("failed to parse policy as a DSSE envelope: %w", err)
 	}
 
 	keyFile, err := os.Open(o.PolicyPubKeyPath)

@@ -21,12 +21,16 @@ import (
 // Admission returns an http.HandlerFunc that validates every container image
 // in an incoming Pod against the witness policy.
 //
+// verifier is any ImageVerifier — the plain file-based *verify.Verifier, or
+// the *verify.Swappable that platform policy-sync hot-swaps.
+//
 // pc is optional. Without it (nil) the webhook behaves exactly like the
 // original PoC: always enforcing, reporting nothing. With it, the enforcement
 // mode comes from the platform's last check-in (AUDIT admits everything but
-// records the would-deny) and every per-container verdict is queued for the
-// batched decision report.
-func Admission(verifier *verify.Verifier, pc *platform.Client) http.HandlerFunc {
+// records the would-deny), the bound policy's namespace selector scopes
+// enforcement, and every per-container verdict is queued for the batched
+// decision report.
+func Admission(verifier verify.ImageVerifier, pc *platform.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -75,6 +79,29 @@ func Admission(verifier *verify.Verifier, pc *platform.Client) http.HandlerFunc 
 		}
 
 		workloadKind, workloadName := ownerWorkload(pod)
+
+		// Namespace scoping from the bound policy: a pod in a namespace the
+		// binding does not cover is admitted without verification, recorded as
+		// NO_POLICY so the platform feed shows the gap honestly.
+		if pc != nil {
+			if nss := pc.PolicyNamespaces(); len(nss) > 0 && !containsString(nss, pod.Namespace) {
+				pc.Record(platform.Decision{
+					Namespace:    pod.Namespace,
+					WorkloadKind: workloadKind,
+					WorkloadName: workloadName,
+					ImageRef:     firstImage(pod),
+					Verdict:      platform.VerdictNoPolicy,
+					Action:       platform.ActionAdmitted,
+					Mode:         mode,
+					Reason:       "namespace not covered by the bound policy",
+					At:           time.Now().UTC(),
+				})
+				response.Allowed = true
+				response.Result = &metav1.Status{Code: http.StatusOK, Message: "namespace not covered by the bound policy"}
+				writeReview(w, &review)
+				return
+			}
+		}
 
 		containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
 		containers = append(containers, pod.Spec.Containers...)
@@ -154,6 +181,28 @@ func Admission(verifier *verify.Verifier, pc *platform.Client) http.HandlerFunc 
 
 		writeReview(w, &review)
 	}
+}
+
+// containsString reports whether list contains s.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// firstImage returns the pod's first container image, for labeling pod-level
+// (not per-container) decisions like the NO_POLICY namespace skip.
+func firstImage(pod *corev1.Pod) string {
+	if len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Image
+	}
+	if len(pod.Spec.InitContainers) > 0 {
+		return pod.Spec.InitContainers[0].Image
+	}
+	return ""
 }
 
 // ownerWorkload names the workload that owns the pod, from its first owner

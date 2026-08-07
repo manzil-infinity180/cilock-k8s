@@ -52,23 +52,31 @@ func registerCommonFlags(fs *flag.FlagSet, cf *commonFlags) {
 	fs.Var(&cf.registryAliases, "registry-alias", "rewrite a registry host before resolving, as from=to (repeatable)")
 }
 
-func newVerifier(cf *commonFlags) (*verify.Verifier, error) {
+func verifierOptions(cf *commonFlags) (verify.Options, error) {
 	aliases := map[string]string{}
 	for _, alias := range cf.registryAliases {
 		from, to, ok := strings.Cut(alias, "=")
 		if !ok {
-			return nil, fmt.Errorf("invalid --registry-alias %q, expected from=to", alias)
+			return verify.Options{}, fmt.Errorf("invalid --registry-alias %q, expected from=to", alias)
 		}
 		aliases[from] = to
 	}
 
-	return verify.New(verify.Options{
+	return verify.Options{
 		PolicyPath:         cf.policy,
 		PolicyPubKeyPath:   cf.policyKey,
 		AttestationDir:     cf.attestationDir,
 		InsecureRegistries: cf.insecureRegistries,
 		RegistryAliases:    aliases,
-	})
+	}, nil
+}
+
+func newVerifier(cf *commonFlags) (*verify.Verifier, error) {
+	o, err := verifierOptions(cf)
+	if err != nil {
+		return nil, err
+	}
+	return verify.New(o)
 }
 
 func main() {
@@ -151,6 +159,19 @@ func serveCmd(args []string) {
 		log.Printf("platform mode: reporting to %s as cluster %s (mode %s until first check-in)", *platformURL, uid, pc.Mode())
 	}
 
+	// The webhook verifies through a swappable wrapper so platform policy-sync
+	// can replace the policy at runtime; without a platform it is a zero-cost
+	// indirection over the file-based verifier.
+	swap := verify.NewSwappable(verifier)
+	if pc != nil {
+		opts, err := verifierOptions(cf)
+		if err != nil {
+			log.Fatalf("failed to build verifier options for policy sync: %v", err)
+		}
+		sync := platform.NewPolicySync(pc, swap, opts, verifier)
+		pc.SetOnBoundPolicy(sync.Apply)
+	}
+
 	// pcDone closes once the platform client has made its final flush after
 	// ctx is cancelled; already closed when running without a platform.
 	pcDone := make(chan struct{})
@@ -164,7 +185,7 @@ func serveCmd(args []string) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/validate", handlers.Admission(verifier, pc))
+	mux.HandleFunc("/validate", handlers.Admission(swap, pc))
 	mux.HandleFunc("/healthz", handlers.Health)
 
 	server := &http.Server{

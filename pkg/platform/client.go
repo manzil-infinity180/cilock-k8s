@@ -70,6 +70,21 @@ type Config struct {
 
 	// HTTPClient overrides the default client (10s timeout).
 	HTTPClient *http.Client
+
+	// OnBoundPolicy, when set, is invoked after every successful check-in with
+	// the policy currently bound to this cluster (nil when none is bound).
+	// Policy-sync registers itself here. Invoked synchronously from the Run
+	// loop; implementations must bound their own work with the ctx.
+	OnBoundPolicy func(ctx context.Context, bp *BoundPolicy)
+}
+
+// BoundPolicy is the policy the platform says this cluster must enforce,
+// as returned by clusterAgentCheckIn.
+type BoundPolicy struct {
+	PolicyReleaseID  string   `json:"policyReleaseID"`
+	Tag              string   `json:"tag"`
+	DsseGitoidSha256 string   `json:"dsseGitoidSha256"`
+	Namespaces       []string `json:"namespaces"`
 }
 
 // Decision is one admission verdict for one container, as recorded by the
@@ -99,12 +114,19 @@ type aggregated struct {
 // Client is the agent-side platform connection. Safe for concurrent use by the
 // webhook handler and the Run loop.
 type Client struct {
-	cfg        Config
-	graphqlURL string
-	http       *http.Client
+	cfg           Config
+	graphqlURL    string
+	archivistaURL string
+	http          *http.Client
 
-	modeMu sync.RWMutex
-	mode   string
+	modeMu      sync.RWMutex
+	mode        string
+	boundPolicy *BoundPolicy
+
+	// legacyCheckIn flips on when the platform rejects the boundPolicy field
+	// (a server predating policy binding); subsequent check-ins use the legacy
+	// query so one older server does not error every poll.
+	legacyCheckIn bool
 
 	queueMu sync.Mutex
 	queue   map[string]*aggregated
@@ -114,7 +136,8 @@ type Client struct {
 // discoveryDoc is the subset of /.well-known/judge-configuration the agent
 // needs. Field names mirror cilock's internal/config/discovery.go.
 type discoveryDoc struct {
-	GraphQLURL string `json:"graphql_url"`
+	GraphQLURL    string `json:"graphql_url"`
+	ArchivistaURL string `json:"archivista_url"`
 }
 
 // New builds a Client and resolves the GraphQL endpoint from the platform's
@@ -164,6 +187,11 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	if c.graphqlURL == "" {
 		c.graphqlURL = base + "/query"
 	}
+	c.archivistaURL = strings.TrimRight(doc.ArchivistaURL, "/")
+	if c.archivistaURL == "" {
+		// Embedded archivista serves /download on the platform mux.
+		c.archivistaURL = base
+	}
 
 	return c, nil
 }
@@ -190,6 +218,12 @@ func (c *Client) discover(ctx context.Context, base string) (*discoveryDoc, erro
 	}
 
 	return doc, nil
+}
+
+// SetOnBoundPolicy registers the bound-policy callback (policy sync). Must be
+// called before Run starts; not safe to call concurrently with Run.
+func (c *Client) SetOnBoundPolicy(f func(ctx context.Context, bp *BoundPolicy)) {
+	c.cfg.OnBoundPolicy = f
 }
 
 // Mode returns the enforcement mode from the most recent successful check-in,
@@ -283,37 +317,118 @@ func (c *Client) Run(ctx context.Context) {
 	}
 }
 
-// CheckIn performs one heartbeat/config poll and applies the returned mode.
+// CheckIn performs one heartbeat/config poll and applies the returned mode and
+// bound policy. It first asks for the boundPolicy field; a platform that
+// predates policy binding rejects the unknown field, in which case the client
+// downgrades to the legacy query for the rest of its life and policy sync
+// stays inactive.
 func (c *Client) CheckIn(ctx context.Context) error {
-	const query = `mutation AgentCheckIn($input: ClusterAgentCheckInInput!) {
+	const queryFull = `mutation AgentCheckIn($input: ClusterAgentCheckInInput!) {
+  clusterAgentCheckIn(input: $input) {
+    clusterID
+    enforcementMode
+    boundPolicy { policyReleaseID tag dsseGitoidSha256 namespaces }
+  }
+}`
+	const queryLegacy = `mutation AgentCheckIn($input: ClusterAgentCheckInInput!) {
   clusterAgentCheckIn(input: $input) { clusterID enforcementMode }
 }`
 
 	var resp struct {
 		ClusterAgentCheckIn struct {
-			ClusterID       string `json:"clusterID"`
-			EnforcementMode string `json:"enforcementMode"`
+			ClusterID       string       `json:"clusterID"`
+			EnforcementMode string       `json:"enforcementMode"`
+			BoundPolicy     *BoundPolicy `json:"boundPolicy"`
 		} `json:"clusterAgentCheckIn"`
 	}
 
-	err := c.do(ctx, query, map[string]any{"input": map[string]any{
+	vars := map[string]any{"input": map[string]any{
 		"clusterUID":   c.cfg.ClusterUID,
 		"agentVersion": c.cfg.AgentVersion,
-	}}, &resp)
+	}}
+
+	query := queryFull
+	if c.legacyCheckIn {
+		query = queryLegacy
+	}
+
+	err := c.do(ctx, query, vars, &resp)
+	if err != nil && !c.legacyCheckIn && strings.Contains(err.Error(), "boundPolicy") {
+		log.Printf("platform: server does not know boundPolicy (pre-binding server) — policy sync disabled, using legacy check-in")
+		c.legacyCheckIn = true
+		err = c.do(ctx, queryLegacy, vars, &resp)
+	}
 	if err != nil {
 		return err
 	}
 
 	mode := resp.ClusterAgentCheckIn.EnforcementMode
+	bp := resp.ClusterAgentCheckIn.BoundPolicy
 	c.modeMu.Lock()
 	changed := c.mode != mode
 	c.mode = mode
+	c.boundPolicy = bp
 	c.modeMu.Unlock()
 	if changed {
 		log.Printf("platform: enforcement mode is now %s", mode)
 	}
 
+	if c.cfg.OnBoundPolicy != nil {
+		c.cfg.OnBoundPolicy(ctx, bp)
+	}
+
 	return nil
+}
+
+// BoundPolicy returns the policy from the most recent successful check-in, or
+// nil when none is bound (or the platform predates policy binding).
+func (c *Client) BoundPolicy() *BoundPolicy {
+	c.modeMu.RLock()
+	defer c.modeMu.RUnlock()
+	return c.boundPolicy
+}
+
+// PolicyNamespaces returns the bound policy's namespace selector; empty means
+// "applies everywhere the webhook watches" (including when no policy is bound).
+func (c *Client) PolicyNamespaces() []string {
+	c.modeMu.RLock()
+	defer c.modeMu.RUnlock()
+	if c.boundPolicy == nil {
+		return nil
+	}
+	return c.boundPolicy.Namespaces
+}
+
+// DownloadGitoid fetches a DSSE envelope from Archivista by gitoid, using the
+// agent credential (attestation:read). Capped at 8 MiB — a witness policy is
+// kilobytes; anything larger is wrong.
+func (c *Client) DownloadGitoid(ctx context.Context, gitoid string) ([]byte, error) {
+	if gitoid == "" {
+		return nil, fmt.Errorf("platform: empty gitoid")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.archivistaURL+"/download/"+gitoid, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("platform: policy download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("platform: policy download returned %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, fmt.Errorf("platform: policy download read failed: %w", err)
+	}
+	return body, nil
 }
 
 // Flush reports every queued aggregate, in batches of MaxBatch. On failure the
