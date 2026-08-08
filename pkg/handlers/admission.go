@@ -3,22 +3,35 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	admv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/manzil-infinity180/cilock-k8s/pkg/platform"
 	"github.com/manzil-infinity180/cilock-k8s/pkg/verify"
 )
 
 // Admission returns an http.HandlerFunc that validates every container image
 // in an incoming Pod against the witness policy.
-func Admission(verifier *verify.Verifier) http.HandlerFunc {
+//
+// verifier is any ImageVerifier — the plain file-based *verify.Verifier, or
+// the *verify.Swappable that platform policy-sync hot-swaps.
+//
+// pc is optional. Without it (nil) the webhook behaves exactly like the
+// original PoC: always enforcing, reporting nothing. With it, the enforcement
+// mode comes from the platform's last check-in (AUDIT admits everything but
+// records the would-deny), the bound policy's namespace selector scopes
+// enforcement, and every per-container verdict is queued for the batched
+// decision report.
+func Admission(verifier verify.ImageVerifier, pc *platform.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -52,38 +65,165 @@ func Admission(verifier *verify.Verifier) http.HandlerFunc {
 			podName = pod.GenerateName + "?"
 		}
 
+		mode := platform.ModeEnforce
+		if pc != nil {
+			mode = pc.Mode()
+		}
+
+		// DISABLED: the platform told the agent to stand down entirely — no
+		// verification, no recording, admit as if the webhook were absent.
+		if mode == platform.ModeDisabled {
+			response.Allowed = true
+			response.Result = &metav1.Status{Code: http.StatusOK, Message: "admission control disabled by platform"}
+			writeReview(w, &review)
+			return
+		}
+
+		workloadKind, workloadName := ownerWorkload(pod)
+
+		// Namespace scoping from the bound policy: a pod in a namespace the
+		// binding does not cover is admitted without verification, recorded as
+		// NO_POLICY so the platform feed shows the gap honestly.
+		if pc != nil {
+			if nss := pc.PolicyNamespaces(); len(nss) > 0 && !containsString(nss, pod.Namespace) {
+				pc.Record(platform.Decision{
+					Namespace:    pod.Namespace,
+					WorkloadKind: workloadKind,
+					WorkloadName: workloadName,
+					ImageRef:     firstImage(pod),
+					Verdict:      platform.VerdictNoPolicy,
+					Action:       platform.ActionAdmitted,
+					Mode:         mode,
+					Reason:       "namespace not covered by the bound policy",
+					At:           time.Now().UTC(),
+				})
+				response.Allowed = true
+				response.Result = &metav1.Status{Code: http.StatusOK, Message: "namespace not covered by the bound policy"}
+				writeReview(w, &review)
+				return
+			}
+		}
+
 		containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
 		containers = append(containers, pod.Spec.Containers...)
 
-		verified := []string{}
-		failures := []string{}
-		for _, container := range containers {
-			result, err := verifier.VerifyImage(r.Context(), container.Image)
-			if err != nil {
-				log.Printf("DENY pod=%s/%s container=%s image=%s: %v", pod.Namespace, podName, container.Name, container.Image, err)
-				failures = append(failures, fmt.Sprintf("container %q image %q: %v", container.Name, container.Image, err))
-				continue
-			}
-
-			log.Printf("PASS pod=%s/%s container=%s image=%s digests=(%s) steps=%v",
-				pod.Namespace, podName, container.Name, container.Image, result.Digests, result.StepNames)
-			verified = append(verified, container.Image)
+		type containerVerdict struct {
+			container corev1.Container
+			decision  platform.Decision
 		}
 
-		if len(failures) > 0 {
+		verified := []string{}
+		failures := []string{}
+		verdicts := make([]containerVerdict, 0, len(containers))
+		for _, container := range containers {
+			d := platform.Decision{
+				Namespace:    pod.Namespace,
+				WorkloadKind: workloadKind,
+				WorkloadName: workloadName,
+				ImageRef:     container.Image,
+				Mode:         mode,
+				At:           time.Now().UTC(),
+			}
+
+			result, err := verifier.VerifyImage(r.Context(), container.Image)
+			if err != nil {
+				// FAIL = the policy genuinely rejected the image; ERROR = the
+				// machinery could not evaluate it (registry unreachable, digest
+				// resolution failed). Both deny under enforce — fail closed —
+				// but the feed must not present an outage as a policy verdict.
+				var policyFailure *verify.PolicyFailureError
+				if errors.As(err, &policyFailure) {
+					d.Verdict = platform.VerdictFail
+				} else {
+					d.Verdict = platform.VerdictError
+				}
+				d.Reason = err.Error()
+				failures = append(failures, fmt.Sprintf("container %q image %q: %v", container.Name, container.Image, err))
+			} else {
+				d.Verdict = platform.VerdictPass
+				d.ImageDigest = result.Digests.ManifestDigest
+				d.ImageID = result.Digests.ConfigDigest
+				log.Printf("PASS pod=%s/%s container=%s image=%s digests=(%s) steps=%v",
+					pod.Namespace, podName, container.Name, container.Image, result.Digests, result.StepNames)
+				verified = append(verified, container.Image)
+			}
+
+			verdicts = append(verdicts, containerVerdict{container: container, decision: d})
+		}
+
+		// The pod is denied only when something failed AND we are enforcing.
+		// In AUDIT mode a failure is recorded as verdict=FAIL, action=ADMITTED.
+		denied := len(failures) > 0 && mode == platform.ModeEnforce
+
+		action := platform.ActionAdmitted
+		if denied {
+			action = platform.ActionDenied
+		}
+		for _, cv := range verdicts {
+			cv.decision.Action = action
+			if cv.decision.Verdict != platform.VerdictPass {
+				verb := "DENY"
+				if !denied {
+					verb = "WOULD-DENY (audit)"
+				}
+				log.Printf("%s [%s] pod=%s/%s container=%s image=%s: %s", verb, cv.decision.Verdict, pod.Namespace, podName, cv.container.Name, cv.container.Image, cv.decision.Reason)
+			}
+			if pc != nil {
+				pc.Record(cv.decision)
+			}
+		}
+
+		if denied {
 			deny(response, fmt.Sprintf("witness policy verification failed: %s", strings.Join(failures, "; ")))
 			writeReview(w, &review)
 			return
 		}
 
 		response.Allowed = true
+		message := fmt.Sprintf("witness policy verification passed for images: %s", strings.Join(verified, ", "))
+		if len(failures) > 0 {
+			message = fmt.Sprintf("audit mode: policy failed but pod admitted: %s", strings.Join(failures, "; "))
+		}
 		response.Result = &metav1.Status{
 			Code:    http.StatusOK,
-			Message: fmt.Sprintf("witness policy verification passed for images: %s", strings.Join(verified, ", ")),
+			Message: message,
 		}
 
 		writeReview(w, &review)
 	}
+}
+
+// containsString reports whether list contains s.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// firstImage returns the pod's first container image, for labeling pod-level
+// (not per-container) decisions like the NO_POLICY namespace skip.
+func firstImage(pod *corev1.Pod) string {
+	if len(pod.Spec.Containers) > 0 {
+		return pod.Spec.Containers[0].Image
+	}
+	if len(pod.Spec.InitContainers) > 0 {
+		return pod.Spec.InitContainers[0].Image
+	}
+	return ""
+}
+
+// ownerWorkload names the workload that owns the pod, from its first owner
+// reference (ReplicaSet, StatefulSet, Job, ...). Empty for bare pods; the
+// platform records the decision without a workload in that case.
+func ownerWorkload(pod *corev1.Pod) (kind, name string) {
+	if len(pod.OwnerReferences) == 0 {
+		return "", ""
+	}
+	owner := pod.OwnerReferences[0]
+	return owner.Kind, owner.Name
 }
 
 func deny(response *admv1.AdmissionResponse, message string) {

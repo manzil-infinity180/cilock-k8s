@@ -138,11 +138,54 @@ webhook re-derives it from the registry at admission time — so the attestation
 made on the build machine binds to the image the node will actually run,
 without needing the registry manifest digest at attestation time.
 
+## Platform mode (TestifySec platform integration)
+
+Platform mode connects the webhook to a [TestifySec Judge
+platform](https://www.testifysec.com) tenant. It is **opt-in**: without
+`--platform-url` the webhook behaves exactly as documented above (file-based
+policy, always enforcing, nothing reported) — that is also the offline /
+air-gapped mode.
+
+```bash
+cilock-k8s serve \
+  --platform-url https://judge.example.com \
+  --platform-token "$CILOCK_PLATFORM_TOKEN" \   # from registerKubernetesCluster; or env
+  --policy policy.signed.json --policy-key policy-pub.pem \
+  --attestation-dir attestations
+```
+
+What the platform connection does (all connections are opened by the agent,
+outward — the platform never dials into the cluster):
+
+- **Registration & heartbeat** — the agent identifies its cluster by the
+  `kube-system` namespace UID (auto-detected in-cluster, or `--cluster-uid`)
+  and checks in every ~60s. The check-in response carries the cluster's
+  **enforcement mode**: `AUDIT` (verify + report, admit everything — the
+  default until the first successful check-in), `ENFORCE` (deny on failure),
+  or `DISABLED` (stand down).
+- **Decision reporting** — every per-container verdict (pass *and* fail) is
+  reported, pre-aggregated (identical decisions collapse into one row with an
+  occurrence count) and batched, into the platform's admission-decision feed.
+- **Policy sync** — when a policy is bound to the cluster on the platform, the
+  check-in carries its Archivista gitoid; the agent downloads the signed
+  policy envelope, verifies it against `--policy-key`, and hot-swaps the
+  verifier without a restart. Rotating a policy on the platform reaches the
+  cluster within one poll. A binding's namespace list scopes enforcement;
+  pods outside it are admitted and recorded as `NO_POLICY`.
+
+The agent credential is minted by the platform's `registerKubernetesCluster`
+mutation, scoped to reporting only (it cannot change its own enforcement mode
+or upload attestations), and revoking the cluster on the platform kills it.
+
 ## Status / limitations (PoC)
 
 - Attestations and policy are static ConfigMap mounts — no Archivista/Rekor
-  lookup yet, so rotating evidence means redeploying the ConfigMaps.
-- The policy trusts a single embedded public key (no Fulcio/keyless, no TSA).
+  lookup yet, so rotating evidence means redeploying the ConfigMaps. (In
+  platform mode the *policy* half of this is solved by policy sync; the
+  attestation directory is still file-mounted.)
+- The policy trusts a single embedded public key (no Fulcio/keyless, no TSA) —
+  platform mode keeps this trust model for now: synced policy content comes
+  from the platform, but the trust anchor is still `--policy-key`.
 - Only `CREATE pod` is validated; higher-level workloads (Deployments etc.)
   are caught when their pods are created.
 - Multi-arch indexes resolve to the platform matching the webhook's
