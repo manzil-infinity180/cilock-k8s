@@ -3,6 +3,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -126,7 +127,16 @@ func Admission(verifier verify.ImageVerifier, pc *platform.Client) http.HandlerF
 
 			result, err := verifier.VerifyImage(r.Context(), container.Image)
 			if err != nil {
-				d.Verdict = platform.VerdictFail
+				// FAIL = the policy genuinely rejected the image; ERROR = the
+				// machinery could not evaluate it (registry unreachable, digest
+				// resolution failed). Both deny under enforce — fail closed —
+				// but the feed must not present an outage as a policy verdict.
+				var policyFailure *verify.PolicyFailureError
+				if errors.As(err, &policyFailure) {
+					d.Verdict = platform.VerdictFail
+				} else {
+					d.Verdict = platform.VerdictError
+				}
 				d.Reason = err.Error()
 				failures = append(failures, fmt.Sprintf("container %q image %q: %v", container.Name, container.Image, err))
 			} else {
@@ -151,12 +161,12 @@ func Admission(verifier verify.ImageVerifier, pc *platform.Client) http.HandlerF
 		}
 		for _, cv := range verdicts {
 			cv.decision.Action = action
-			if cv.decision.Verdict == platform.VerdictFail {
+			if cv.decision.Verdict != platform.VerdictPass {
 				verb := "DENY"
 				if !denied {
 					verb = "WOULD-DENY (audit)"
 				}
-				log.Printf("%s pod=%s/%s container=%s image=%s: %s", verb, pod.Namespace, podName, cv.container.Name, cv.container.Image, cv.decision.Reason)
+				log.Printf("%s [%s] pod=%s/%s container=%s image=%s: %s", verb, cv.decision.Verdict, pod.Namespace, podName, cv.container.Name, cv.container.Image, cv.decision.Reason)
 			}
 			if pc != nil {
 				pc.Record(cv.decision)

@@ -149,6 +149,19 @@ type Result struct {
 	StepNames []string
 }
 
+// PolicyFailureError marks a verification failure where the machinery WORKED —
+// the image resolved, evidence was consulted — and the policy genuinely
+// rejected it. Callers use errors.As to distinguish it from infrastructure
+// failures (registry unreachable, digest resolution) so the two report as
+// different verdicts: FAIL for a policy rejection, ERROR for "could not
+// evaluate". Both deny in enforce mode (fail closed); only the label differs.
+type PolicyFailureError struct {
+	Underlying error
+}
+
+func (e *PolicyFailureError) Error() string { return e.Underlying.Error() }
+func (e *PolicyFailureError) Unwrap() error { return e.Underlying }
+
 // VerifyImage resolves imageRef to its digests and verifies them against the
 // policy. A nil error means the policy passed.
 func (v *Verifier) VerifyImage(ctx context.Context, imageRef string) (*Result, error) {
@@ -167,7 +180,7 @@ func (v *Verifier) VerifyImage(ctx context.Context, imageRef string) (*Result, e
 		workflow.VerifyWithCollectionSource(v.collectionSrc),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("image %s (%s) failed policy verification: %w", imageRef, digests, err)
+		return nil, &PolicyFailureError{Underlying: fmt.Errorf("image %s (%s) failed policy verification: %w", imageRef, digests, err)}
 	}
 
 	result := &Result{ImageRef: imageRef, Digests: digests}
